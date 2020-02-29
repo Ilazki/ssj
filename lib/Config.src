@@ -1,0 +1,66 @@
+// Functions for parsing and generating a human-readable config file
+// format.  Config.parse reads a config string and returns a map, 
+// and Config.dump takes a map and returns a config string.
+
+Config = {}
+
+// Short example of a config string corresponding to this map:
+// {"top": {"key": "1", "key2": "2", "nested": {"key": "1", "key2": "2"}}}
+// 
+// # Lines starting with # or // are ignored.  Blank lines as well.
+// 
+// # A value by itself indicates a nested map
+// top
+// 	key  = 1
+// 	key2 = 2
+// 	nested
+// 		key  = 1
+// 		key2 = 2
+// 	end
+// end
+
+// Takes a string to parse (usually from a file) and returns a map
+// with nested key/value pairs corresponding to string contents.
+Config.parse = function (s)
+	_parse = function (lst)
+		m = {}
+		while lst
+			l = lst.pull
+			// Ignore comments
+			if l.indexOf("#") == 0 then continue
+			if l.indexOf("//") == 0 then continue
+			// Basic cleanup. Strip whitespace, split by first equal
+			l = l.split("=")
+			left = l[0].trim
+			right = l[1:].join("=").trim
+			// Actual parsing
+			if left == "" then continue
+			if left == "end" then return m
+			if right then
+				m[left] = right
+			else
+				m[left] = _parse(lst)
+			end if
+		end while
+		return m
+	end function
+	return _parse(s.split("\n"))
+end function
+
+// Takes a map, potentially containing nested maps, and returns
+// a string suitable for writing to a file.
+Config.dump = function (m,i)
+	indent = "	"
+	l = []
+	if not i then i = 0
+	for pair in m
+		if typeof(pair.value) == "map" then
+			l.push(indent*i + pair.key)
+			l.push(Config.dump(pair.value, i+1))
+			l.push(indent*i + "end")
+		else
+			l.push(indent*i + pair.key + " = " + pair.value)
+		end if
+	end for
+	return l.join("\n")
+end function

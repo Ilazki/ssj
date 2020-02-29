@@ -1,0 +1,264 @@
+//#open Params.src
+//#open Config.src
+//#open Map.src
+//#open List.src
+//#open Text.src
+//#open File.src
+
+// Using the standard config dir instead of .ssh/config for consistency
+// with built-in game tools.
+DEFAULT_CONFIG = home_dir + "/Config/ssj.conf"
+VERSION = "1.0.2"
+
+print_help = function()
+	b = @Text.bold
+	bin_name = program_path.split("/")[-1]
+	help = []
+	help.push(b("Usage: " + bin_name + " [switches] [user[:pass]@]host[:port]\n"))
+	help.push("\n\n")
+	help.push(b("-h	--help				") + "Print this message and exit\n")
+	help.push(b("-v	--version			") + "Print version information and exit\n")
+	help.push(b("  	--proto				") + "Protocol to use, defaults to ssh\n")
+	help.push(b("-J	--jump				") + "Comma-separated list of bounce hosts.\n")
+	help.push(     "							"  + "Connects to all jumps (last to first)\n")
+	help.push(     "							"  + "before connecting to destination host.\n")
+	help.push(b("-F	--conf				") + "Path to config file to use.  Defaults \n")
+	help.push(     "							"  + "to ~/Config/ssj.cfg.\n")
+	help.push(b("-s	--simulate			") + "Simulation mode that skips the actual\n")
+	help.push(b("  	--sim					") + "connection to hosts.  Useful for\n")
+	help.push(     "							"  + "testing jump routes before use.\n")
+	help.push(b("-W	--write_config		") + "Outputs sample configuration file.\n")
+	help.push(     "							"  + "Uses specified -F path if given, or to\n")
+	help.push(     "							"  + "~/Config/ssj.cfg if not.\n")
+	help.push("\n")
+	print(help.join(""))
+	return true
+end function
+
+print_version = function()
+	color = @Text.color
+	bold = @Text.bold
+	blue = "#02A2FF"
+	gold = "#FFBE4A"
+	s = color(blue,bold("ssj")) + " version " + color(blue,bold(VERSION))
+	s = s + ", a powered up ssh replacement by " + color(gold,bold("Ilazki")) + "."
+	print(s)
+	return true
+end function
+
+// TODO:  add option to delete logs on jumps?
+switch = {}
+switch.help    = ["--help", "-h"]
+switch.version = ["--version", "-v"]
+switch.proto   = ["--proto"] // Protocol to connect via
+switch.jump    = ["--jump", "-J"] //Proxy Jump
+switch.conf    = ["--conf", "-F"] // Alternate config file
+switch.sim     = ["--simulate", "--sim", "-s"] // Print action only
+switch.sample  = ["--write_config", "-W"]  // Write sample config file
+
+// TODO:  Add this to Map and List later instead.
+join = function (left,right)
+	return left+right
+end function
+
+valid_switches = Map.reduce(@join,[],switch)
+
+// TODO: add this to Map later.
+has_any = function (m,l)
+	for key in l
+		if m.hasIndex(key) then return key
+	end for
+	return false
+end function
+
+split_login = function (s)
+	m       = {}
+	_       = s.split("@")
+	login   = _[0]
+	remote  = _[1:].join("@")
+	_       = login.split(":")
+	m.user  = _[0]
+	m.pass  = _[1:].join(":")
+	_       = remote.split(":")
+	m.host  = _[0]
+	m.port  = _[1:].join(":")
+	m.proto = ""
+	// If login is only a single name, treat it as host:port  
+	// Requires swapping user/host and pass/port in this case 
+	// due to how the splits occur.
+	if m.host == "" then
+		m.host = m.user
+		m.user = ""
+		m.port = m.pass
+		m.pass = ""
+	end if
+	
+	return m
+end function
+
+// Write sample config file to f, if provided.  Otherwise
+// write to DEFAULT_CONFIG
+write_config = function (f)
+	name = DEFAULT_CONFIG
+	if f then name = f
+	print("Writing sample config file to " + name + "...")
+	s = []
+	s.push("# Lines beginning with # or // are comments and ignored.")
+	s.push("")
+	s.push("# Hosts are defined in blocks.  A block begins ")
+	s.push("# with a name on a line by itself and the word")
+	s.push("# 'end' on a line by itself.  Indentation is ")
+	s.push("# allowed but optional.")
+	s.push("")
+	s.push("# Settings are defined with 'key = value' lines")
+	s.push("# within a block. All settings except user and ")
+	s.push("# host may be omitted. If omitted, ssj will either")
+	s.push("# use a default value or (for passwords) prompt")
+	s.push("# for input.")
+	s.push("# Be aware that names and keys are case-sensitive.")
+	s.push("")
+	s.push("# To use: ssj example")
+	s.push("example")
+	s.push("	host  = 127.0.0.1")
+	s.push("	user  = foo")
+	s.push("	pass  = bar")
+	s.push("	port  = 1234")
+	s.push("	proto = ssh")
+	s.push("	jump = foo,bar,baz")
+	s.push("end")
+	s.push("")
+	s.push("# jump takes a comma-separated list of hosts to")
+	s.push("# connect to.  Hosts can either be names in this")
+	s.push("# config or hosts in user:pass@host:port format")
+	s.push("# Last jump listed is first connected.  Use ")
+	s.push("# --simulate to test a jump list before using it.")
+	s = s.join("\n")
+	File.write(name,s)
+	return true
+end function
+
+// Attempt to get config file from f, if provided. Otherwise
+// attempt to use DEFAULT_CONFIG
+get_config = function (f)
+	name = DEFAULT_CONFIG
+	if f then name = f
+	file = get_shell.host_computer.File(name)
+	if not file then return {}
+	return Config.parse(file.content)
+end function
+
+// Check config for host and populate any settings
+// that aren't explicitly set.
+build_host = function (remote,config)
+	b = @Text.bold
+	merge_config = function(remote, conf)
+		has_jump = remote.hasIndex("jump")
+		if conf.hasIndex("jump")  and not has_jump       then remote.jump  = conf.jump
+		if conf.hasIndex("proto") and remote.proto == "" then remote.proto = conf.proto
+		if conf.hasIndex("user")  and remote.user  == "" then remote.user  = conf.user
+		if conf.hasIndex("pass")  and remote.pass  == "" then remote.pass  = conf.pass
+		if conf.hasIndex("port")  and remote.port  == "" then remote.port  = conf.port
+		remote.host = conf.host
+		return remote		
+	end function
+
+	validate_remote = function(remote)
+		if remote.proto == "" then remote.proto = "ssh"
+		if remote.port  == "" then remote.port  = "22"
+		remote.port = remote.port.to_int
+		if typeof(remote.port) != "number" then exit("Invalid port: " + b(remote.port))
+		if remote.user == "" then exit("No username supplied for host " + b(remote.host))
+		if remote.pass == "" then 
+			prompt = "Password for " + remote.user + "@" + remote.host + ":  "
+			remote.pass = user_input(prompt)
+		end if
+		return remote
+	end function
+
+	// Merge config and cli args
+	if config.hasIndex(remote.host) then 
+		remote = merge_config(remote, config[remote.host])
+	end if
+	// Validation
+	remote = validate_remote(remote)
+	return remote
+end function
+
+// Split and merge a single host with config.
+build_split = function(s)
+	return build_host(split_login(s),config)	
+end function
+
+// Build jump list recursively. Order may be unintuitive, test with --sim
+build_jumplist = function(init)
+	jumplist = [init]
+	i = 0
+	while i < jumplist.len
+		if jumplist[i].hasIndex("jump") then
+			_ = jumplist[i].jump.split(",")	
+			jumplist = jumplist + List.map(@build_split, _)
+		end if
+		i = i + 1
+	end while
+	jumplist.reverse
+	return jumplist
+end function
+
+// Connect to JUMP from remote SH
+// if SIM is true, don't actually connect, just simulate and print connection chain.
+connect_host = function(sh,jump,sim)
+	pfx = ""
+	b = @Text.bold
+	if sim then pfx = b("[SIM] ")
+	host_string = [jump.user,"@", jump.host, ":", jump.port].join("")
+	msg = [pfx, "Connecting to ", b(host_string), "..."].join("")
+	print(msg)
+	if not sim then 
+		sh = sh.connect_service(jump.host, jump.port, jump.user, jump.pass, jump.proto)
+	end if
+	if not sh then
+		err = [pfx, "Connection to ", b(host_string), " failed. Exiting."].join("")
+		exit(err)
+	end if
+	return sh
+end function
+
+// BEGIN MAIN PROGRAM
+switches = Params.parse(params,valid_switches)
+
+if has_any(switches,switch.help) then print_help and exit()
+if has_any(switches,switch.version) then print_version and exit()
+
+// Get config file and either write sample or load existing.
+   c = has_any(switches,switch.conf)
+if c then c = switches[c]
+if has_any(switches,switch.sample) then write_config(c) and exit()
+config = get_config(c)
+
+// Can't operate without a host.
+if switches.extra.len < 1 then print_help and exit()
+
+// Parse remote address and populate from switches
+remote = split_login(switches.extra[0])
+   p = has_any(switches,switch.proto)
+if p then remote.proto = switches[p]
+   p = has_any(switches,switch.jump)
+if p then remote.jump = switches[p]
+
+
+// The first and possibly only host to connect to.
+end_host = build_host(remote,config)
+
+// Build jumplist starting with end_host
+jumplist = build_jumplist(end_host)
+
+// Go through jumplist, chaining connections and printing output.
+shell = get_shell
+sim = has_any(switches,switch.sim)
+
+for j in jumplist
+	shell = connect_host(shell,j,sim)
+end for
+
+if not sim then shell.start_terminal
+
